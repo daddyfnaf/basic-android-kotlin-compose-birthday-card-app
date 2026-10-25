@@ -399,7 +399,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
+        override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == ACTION_GO_HOME) {
@@ -554,6 +554,7 @@ fun requestOverlayPermission(context: Context) {
     ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(intent) }
 }
+// ===== СТЫК: НАЧАЛО ЧАСТИ 2 =====
 
 @Composable
 fun MediaPlayerWidget(
@@ -571,4 +572,856 @@ fun MediaPlayerWidget(
     var playbackState by remember { mutableStateOf<PlaybackState?>(null) }
 
     DisposableEffect(lifecycleOwner) {
-        
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isNotificationAccessGranted = isNotificationServiceEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    DisposableEffect(isNotificationAccessGranted) {
+        if (!isNotificationAccessGranted) return@DisposableEffect onDispose {}
+
+        val sessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+        val componentName = ComponentName(context, MediaNotificationListener::class.java)
+
+        fun pickBestController(controllers: List<MediaController>?): MediaController? {
+            if (controllers.isNullOrEmpty()) return null
+            return controllers.firstOrNull {
+                it.packageName == YANDEX_MUSIC_PKG && it.playbackState?.state == PlaybackState.STATE_PLAYING
+            } ?: controllers.firstOrNull {
+                it.playbackState?.state == PlaybackState.STATE_PLAYING
+            } ?: controllers.firstOrNull {
+                it.packageName == YANDEX_MUSIC_PKG
+            } ?: controllers.firstOrNull()
+        }
+
+        val listener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
+            mediaController = pickBestController(controllers)
+        }
+
+        try {
+            sessionManager?.addOnActiveSessionsChangedListener(listener, componentName)
+            mediaController = pickBestController(sessionManager?.getActiveSessions(componentName))
+        } catch (_: SecurityException) {
+            isNotificationAccessGranted = false
+        }
+
+        onDispose {
+            try {
+                sessionManager?.removeOnActiveSessionsChangedListener(listener)
+            } catch (_: Exception) {}
+        }
+    }
+
+    DisposableEffect(mediaController) {
+        val controller = mediaController
+        if (controller == null) {
+            metadata = null
+            playbackState = null
+            return@DisposableEffect onDispose {}
+        }
+
+        val callback = object : MediaController.Callback() {
+            override fun onMetadataChanged(m: MediaMetadata?) { metadata = m }
+            override fun onPlaybackStateChanged(s: PlaybackState?) { playbackState = s }
+            override fun onSessionDestroyed() { mediaController = null }
+        }
+        controller.registerCallback(callback)
+        metadata = controller.metadata
+        playbackState = controller.playbackState
+
+        onDispose {
+            runCatching { controller.unregisterCallback(callback) }
+        }
+    }
+
+    CardContainer(modifier = Modifier.fillMaxSize()) {
+        if (!isNotificationAccessGranted) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "ПЕРВИЧНАЯ НАСТРОЙКА NOTHING CAR",
+                    color = TextGray,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(AccentRed)
+                        .clickable {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "1. ДАТЬ ДОСТУП К ЯНДЕКС.МУЗЫКЕ",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                if (!hasOverlayPermission) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OutlineGray)
+                            .clickable { onRequestOverlayPermission() }
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "2. ВКЛЮЧИТЬ УГЛОВУЮ КНОПКУ HOME",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .padding(start = if (hasOverlayPermission) 78.dp else 0.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.clickable {
+                            openYandexMusicOrActivePlayer(context, mediaController)
+                        },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    if (playbackState?.state == PlaybackState.STATE_PLAYING) AccentRed else OutlineGray,
+                                    CircleShape
+                                )
+                        )
+                        val sourceName = when (mediaController?.packageName) {
+                            YANDEX_MUSIC_PKG -> "ЯНДЕКС МУЗЫКА"
+                            null -> "Я.МУЗЫКА"
+                            else -> "ПЛЕЕР"
+                        }
+                        Text(
+                            text = sourceName,
+                            color = TextGray,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    if (!hasOverlayPermission) {
+                        Text(
+                            text = "+ HOME BTN",
+                            color = AccentRed,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { onRequestOverlayPermission() }
+                        )
+                    } else {
+                        Text(
+                            text = "OPEN ↗",
+                            color = AccentRed,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable {
+                                openYandexMusicOrActivePlayer(context, mediaController)
+                            }
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AlbumArt(
+                        metadata = metadata,
+                        onClick = { openYandexMusicOrActivePlayer(context, mediaController) }
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "НЕТ АКТИВНОГО ТРЕКА",
+                            color = Color.White,
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                                ?: "Нажми PLAY для запуска Яндекс.Музыки",
+                            color = TextGray,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+                        TrackProgressSection(playbackState = playbackState, duration = duration)
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(62.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ControlButton(
+                        modifier = Modifier.weight(1f),
+                        label = "|<<",
+                        onClick = { mediaController?.transportControls?.skipToPrevious() }
+                    )
+                    val isPlaying = playbackState?.state == PlaybackState.STATE_PLAYING
+                    ControlButton(
+                        modifier = Modifier.weight(1.3f),
+                        label = if (isPlaying) "PAUSE" else "PLAY",
+                        accent = true,
+                        onClick = {
+                            val ctrl = mediaController
+                            if (ctrl == null) {
+                                openYandexMusicOrActivePlayer(context, null)
+                            } else if (isPlaying) {
+                                ctrl.transportControls.pause()
+                            } else {
+                                ctrl.transportControls.play()
+                            }
+                        }
+                    )
+                    ControlButton(
+                        modifier = Modifier.weight(1f),
+                        label = ">>|",
+                        onClick = { mediaController?.transportControls?.skipToNext() }
+                    )
+                }
+            }
+        }
+    }
+}
+
+fun openYandexMusicOrActivePlayer(context: Context, controller: MediaController?) {
+    val targetPkg = controller?.packageName ?: YANDEX_MUSIC_PKG
+    if (!launchPackageOnCarDisplay(context, targetPkg)) {
+        Toast.makeText(context, "Яндекс.Музыка не установлена", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+fun AlbumArt(metadata: MediaMetadata?, onClick: () -> Unit) {
+    val imageBitmap: ImageBitmap? = remember(metadata) {
+        runCatching {
+            val rawBitmap = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+
+            rawBitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.let { bmp ->
+                val scaled = if (bmp.width > 160 || bmp.height > 160) {
+                    Bitmap.createScaledBitmap(bmp, 160, 160, true)
+                } else {
+                    bmp
+                }
+                scaled.asImageBitmap()
+            }
+        }.getOrNull()
+    }
+
+    Box(
+        modifier = Modifier
+            .size(92.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(BgBlack)
+            .border(1.dp, OutlineGray, RoundedCornerShape(12.dp))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        if (imageBitmap != null) {
+            Image(
+                bitmap = imageBitmap,
+                contentDescription = "Album Art",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text(
+                text = "Я.М",
+                color = AccentRed,
+                fontSize = 20.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+fun TrackProgressSection(playbackState: PlaybackState?, duration: Long) {
+    val updatedDuration by rememberUpdatedState(duration)
+    var currentPosition by remember(playbackState, duration) {
+        val initialPos = (playbackState?.position ?: 0L).coerceAtLeast(0L)
+        mutableLongStateOf(if (duration > 0L) initialPos.coerceIn(0L, duration) else initialPos)
+    }
+
+    LaunchedEffect(playbackState, duration) {
+        val state = playbackState ?: return@LaunchedEffect
+        while (state.state == PlaybackState.STATE_PLAYING) {
+            val basePos = state.position.coerceAtLeast(0L)
+            val timeDelta = if (state.lastPositionUpdateTime > 0L) {
+                (SystemClock.elapsedRealtime() - state.lastPositionUpdateTime).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            val speed = if (state.playbackSpeed > 0f) state.playbackSpeed else 1f
+            val calculatedPos = basePos + (timeDelta * speed).toLong()
+            val maxDur = updatedDuration
+            currentPosition = if (maxDur > 0L) calculatedPos.coerceIn(0L, maxDur) else calculatedPos
+            delay(1000L)
+        }
+    }
+
+    val progress = if (duration > 0L) {
+        (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+    } else 0f
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .background(OutlineGray, RoundedCornerShape(3.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(progress)
+                    .height(6.dp)
+                    .background(AccentRed, RoundedCornerShape(3.dp))
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = formatTime(currentPosition),
+                color = TextGray,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = formatTime(duration),
+                color = TextGray,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+@Composable
+fun ControlButton(
+    modifier: Modifier = Modifier,
+    label: String,
+    accent: Boolean = false,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (accent) AccentRed else BgBlack)
+            .border(1.dp, if (accent) AccentRed else OutlineGray, RoundedCornerShape(12.dp))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 16.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun DotMatrixClock(modifier: Modifier = Modifier) {
+    var currentTime by remember { mutableStateOf(getCurrentTimeString()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            val now = System.currentTimeMillis()
+            currentTime = getCurrentTimeString()
+            delay(1000L - (now % 1000L))
+        }
+    }
+
+    CardContainer(modifier = modifier.fillMaxWidth()) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp)
+        ) {
+            val text = currentTime
+            val totalCols = 27
+            val totalRows = 7
+
+            val stepX = size.width / totalCols
+            val stepY = size.height / totalRows
+            val step = min(stepX, stepY)
+            val dotRadius = step * 0.36f
+
+            val gridWidth = totalCols * step
+            val gridHeight = totalRows * step
+            val startX = (size.width - gridWidth) / 2f
+            val startY = (size.height - gridHeight) / 2f
+
+            var currentColOffset = 0
+
+            text.forEach { char ->
+                val charCols = if (char == ':') 3 else 5
+                val matrix = DIGIT_MATRICES[char]
+
+                for (row in 0 until totalRows) {
+                    for (col in 0 until charCols) {
+                        val isActive = if (char == ':') {
+                            col == 1 && (row == 2 || row == 4)
+                        } else {
+                            matrix != null && matrix[row * 5 + col] == 1
+                        }
+
+                        val cx = startX + (currentColOffset + col) * step + step / 2f
+                        val cy = startY + row * step + step / 2f
+
+                        drawCircle(
+                            color = if (isActive) Color.White else DotInactive,
+                            radius = dotRadius,
+                            center = Offset(cx, cy)
+                        )
+                    }
+                }
+                currentColOffset += charCols + 1
+            }
+        }
+    }
+}
+
+@Composable
+fun SpeedometerWidget(
+    modifier: Modifier = Modifier,
+    hasPermission: Boolean,
+    onRequestPermission: () -> Unit
+) {
+    val context = LocalContext.current
+    var speedKmh by remember { mutableIntStateOf(0) }
+    var lastLocationFixRealtime by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(hasPermission) {
+        if (!hasPermission) return@LaunchedEffect
+        while (true) {
+            delay(2000L)
+            if (lastLocationFixRealtime > 0L &&
+                SystemClock.elapsedRealtime() - lastLocationFixRealtime > 4000L
+            ) {
+                speedKmh = 0
+            }
+        }
+    }
+
+    DisposableEffect(hasPermission) {
+        if (!hasPermission) return@DisposableEffect onDispose {}
+
+        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        val listener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                lastLocationFixRealtime = SystemClock.elapsedRealtime()
+                val speedMs = if (location.hasSpeed()) location.speed else 0f
+                speedKmh = (speedMs * 3.6f).roundToInt().coerceAtLeast(0)
+            }
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {
+                speedKmh = 0
+            }
+        }
+
+        try {
+            locationManager?.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER,
+                1000L,
+                0f,
+                listener
+            )
+        } catch (_: Exception) {}
+
+        onDispose {
+            runCatching { locationManager?.removeUpdates(listener) }
+        }
+    }
+
+    CardContainer(
+        modifier = modifier.clickable(enabled = !hasPermission) { onRequestPermission() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            if (!hasPermission) {
+                Text(
+                    text = "GPS OFF",
+                    color = AccentRed,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "РАЗРЕШИТЬ",
+                    color = TextGray,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            } else {
+                Text(
+                    text = "$speedKmh",
+                    color = Color.White,
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "KM/H",
+                    color = AccentRed,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun TwoGisButton(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    CardContainer(
+        modifier = modifier.clickable {
+            val packages = listOf(
+                TWOGIS_PKG,
+                "ru.yandex.yandexnavi",
+                "ru.yandex.yandexmaps",
+                "com.google.android.apps.maps"
+            )
+            val opened = packages.any { launchPackageOnCarDisplay(context, it) }
+            if (!opened) {
+                Toast.makeText(context, "2ГИС не найден", Toast.LENGTH_SHORT).show()
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(AccentRed, CircleShape)
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "2ГИС",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = "НАВИГАЦИЯ",
+                color = TextGray,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+@Composable
+fun AllAppsBarButton(modifier: Modifier = Modifier, onClick: () -> Unit) {
+    CardContainer(
+        modifier = modifier.clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = ":::",
+                    color = AccentRed,
+                    fontSize = 18.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "ALL APPS",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                text = "ОТКРЫТЬ СПИСОК →",
+                color = TextGray,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+@Composable
+fun AppDrawerModal(
+    apps: List<AppEntry>,
+    hasOverlayPermission: Boolean,
+    onClose: () -> Unit,
+    onAppClick: (AppEntry) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgBlack)
+            .padding(10.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(CardSurface)
+                .border(1.dp, OutlineGray, RoundedCornerShape(12.dp))
+                .padding(start = if (hasOverlayPermission) 88.dp else 16.dp, end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "::: NOTHING APPS (${apps.size})",
+                color = Color.White,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(AccentRed)
+                    .clickable { onClose() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "ЗАКРЫТЬ ✕",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(5),
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(apps, key = { it.packageName }) { app ->
+                Column(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(CardSurface)
+                        .border(1.dp, OutlineGray, RoundedCornerShape(12.dp))
+                        .clickable { onAppClick(app) }
+                        .padding(vertical = 10.dp, horizontal = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Image(
+                        bitmap = app.icon,
+                        contentDescription = app.label,
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = app.label,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+suspend fun loadInstalledApps(context: Context): List<AppEntry> = withContext(Dispatchers.IO) {
+    val pm = context.packageManager
+    val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+        addCategory(Intent.CATEGORY_LAUNCHER)
+    }
+
+    val resolveInfos = runCatching { pm.queryIntentActivities(mainIntent, 0) }.getOrDefault(emptyList())
+    resolveInfos
+        .mapNotNull { info ->
+            runCatching {
+                val pkg = info.activityInfo?.packageName ?: return@runCatching null
+                if (pkg == context.packageName) return@runCatching null
+
+                val label = info.loadLabel(pm)?.toString() ?: pkg
+                val drawable = info.loadIcon(pm) ?: return@runCatching null
+                AppEntry(
+                    label = label,
+                    packageName = pkg,
+                    icon = drawableToImageBitmap(drawable, 72)
+                )
+            }.getOrNull()
+        }
+        .distinctBy { it.packageName }
+        .sortedWith(
+            compareBy<AppEntry> {
+                when (it.packageName) {
+                    TWOGIS_PKG -> 0
+                    YANDEX_MUSIC_PKG -> 1
+                    else -> 2
+                }
+            }.thenBy { it.label.lowercase(Locale.getDefault()) }
+        )
+}
+
+fun drawableToImageBitmap(drawable: Drawable, sizePx: Int): ImageBitmap {
+    val safeDrawable = drawable.mutate()
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = NativeCanvas(bitmap)
+    safeDrawable.setBounds(0, 0, sizePx, sizePx)
+    safeDrawable.draw(canvas)
+    return bitmap.asImageBitmap()
+}
+
+fun safeGetDisplayId(context: Context): Int {
+    return runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            context.display?.displayId ?: 0
+        } else {
+            0
+        }
+    }.getOrDefault(0)
+}
+
+fun launchPackageOnCarDisplay(context: Context, packageName: String): Boolean {
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return false
+    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    val displayId = safeGetDisplayId(context)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && displayId != 0) {
+        val launchedOnVirtual = runCatching {
+            val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId)
+            context.startActivity(launchIntent, options.toBundle())
+            true
+        }.getOrDefault(false)
+        if (launchedOnVirtual) return true
+    }
+
+    return runCatching {
+        context.startActivity(launchIntent)
+        true
+    }.getOrDefault(false)
+}
+
+@Composable
+fun CardContainer(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(CardSurface)
+            .border(1.dp, OutlineGray, RoundedCornerShape(16.dp))
+    ) {
+        content()
+    }
+}
+
+fun isNotificationServiceEnabled(context: Context): Boolean {
+    return NotificationManagerCompat.getEnabledListenerPackages(context)
+        .contains(context.packageName)
+}
+
+fun getCurrentTimeString(): String {
+    val calendar = Calendar.getInstance()
+    val hour = calendar.get(Calendar.HOUR_OF_DAY)
+    val minute = calendar.get(Calendar.MINUTE)
+    return String.format(Locale.US, "%02d:%02d", hour, minute)
+}
+
+fun formatTime(millis: Long): String {
+    val totalSeconds = (millis / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return String.format(Locale.US, "%02d:%02d", minutes, seconds)
+}
